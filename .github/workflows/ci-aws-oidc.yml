@@ -1,0 +1,57 @@
+# GitHub Actions -> AWS via OIDC (no long-lived keys, no account IDs in git)
+# Set repo SECRETS (Settings -> Secrets and variables -> Actions -> Secrets):
+#   AWS_ROLE_ARN
+#   S3_BACKUP_BUCKET
+#   KMS_CMK_ARN
+# Set repo VARIABLES (optional, non-sensitive):
+#   AWS_REGION     (default ap-south-1)
+#   CLUSTER_NAME   (default yelb-lab)
+name: ci-aws-oidc
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  aws-oidc-smoke:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      CLUSTER_NAME: ${{ vars.CLUSTER_NAME || 'yelb-lab' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Prove identity (assumed role, not access keys)
+        run: aws sts get-caller-identity
+
+      - name: Describe EKS cluster
+        run: |
+          aws eks describe-cluster \
+            --name "${CLUSTER_NAME}" \
+            --query 'cluster.{name:name,status:status,version:version}' \
+            --output table
+
+      - name: List S3 backup bucket
+        run: |
+          aws s3 ls "s3://${{ secrets.S3_BACKUP_BUCKET }}/" --recursive
+
+      - name: Write CI marker object to S3 (SSE-KMS)
+        run: |
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          echo "yelb-ci oidc ok ${STAMP}" | aws s3 cp - \
+            "s3://${{ secrets.S3_BACKUP_BUCKET }}/ci/oidc-${STAMP}.txt" \
+            --sse aws:kms \
+            --sse-kms-key-id "${{ secrets.KMS_CMK_ARN }}"
